@@ -2,9 +2,6 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
-build/
-.eggs/
 
 # Virtual environments
 .venv/
@@ -16,16 +13,12 @@ env/
 .idea/
 *.swp
 
-# Processed data (can be regenerated)
-data/processed/*.csv
-
-# Jupyter
-.ipynb_checkpoints/
-notebooks/.ipynb_checkpoints/
-
 # OS
 .DS_Store
 Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
 
 # CatBoost
 catboost_info/
@@ -34,7 +27,3 @@ catboost_info/
 *.log
 .env
 .pytest_cache/
-
-# Local-only scripts
-start_services.bat
-stop_services.bat

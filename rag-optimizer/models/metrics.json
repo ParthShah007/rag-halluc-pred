@@ -1,0 +1,39 @@
+{
+  "classification": [
+    {
+      "model": "XGBoost",
+      "task": "Correctness",
+      "accuracy": 0.8634,
+      "auc": 0.8503,
+      "f1_macro": 0.8133,
+      "threshold": 0.215,
+      "recall_minority": 0.599
+    },
+    {
+      "model": "XGBoost",
+      "task": "Hallucination",
+      "accuracy": 0.8003,
+      "auc": 0.6886,
+      "f1_macro": 0.6674,
+      "threshold": 0.575,
+      "recall_minority": 0.3784
+    }
+  ],
+  "regression": [
+    {
+      "model": "XGBoost",
+      "task": "Latency",
+      "rmse": 180.7278,
+      "mae": 107.1988,
+      "r2": 0.8632
+    },
+    {
+      "model": "XGBoost",
+      "task": "Cost",
+      "rmse": 0.0001,
+      "mae": 0.0001,
+      "r2": 0.9909
+    }
+  ],
+  "per_class": {}
+}

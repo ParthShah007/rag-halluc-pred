@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Data (large files — not committed to git)
+data/raw/*.csv
+data/processed/*.csv
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CatBoost
+catboost_info/
+
+# Misc
+*.log
+.env
+.pytest_cache/
+
+# Local-only scripts
+start_services.bat
+stop_services.bat
+
+# Debug/experiment outputs
+tests/*_output.txt
+tests/columns.txt
+models/train_output.txt

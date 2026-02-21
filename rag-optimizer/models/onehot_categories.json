@@ -1,0 +1,70 @@
+{
+  "domain": [
+    "developer_docs",
+    "financial_reports",
+    "hr_policies",
+    "medical_guides",
+    "policies",
+    "product_docs",
+    "research_papers",
+    "support_faq"
+  ],
+  "task_type": [
+    "comparison",
+    "explanation",
+    "factoid",
+    "instruction_following",
+    "multi_hop",
+    "summarization",
+    "table_qa",
+    "temporal_reasoning"
+  ],
+  "retrieval_strategy": [
+    "bm25",
+    "bm25_then_rerank",
+    "dense",
+    "dense_then_rerank",
+    "hybrid"
+  ],
+  "chunking_strategy": [
+    "by_heading",
+    "fixed_512_tokens",
+    "semantic",
+    "sliding_window_256_overlap"
+  ],
+  "generator_model": [
+    "claude-3.5-sonnet",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "llama-3.1-70b-instruct",
+    "llama-3.1-8b-instruct",
+    "mistral-large"
+  ],
+  "embedding_model": [
+    "all-minilm-l12-v2",
+    "bge-m3",
+    "e5-mistral-7b",
+    "gte-large",
+    "text-embedding-3-large",
+    "text-embedding-3-small"
+  ],
+  "reranker_model": [
+    "bge-reranker-base",
+    "colbert-v2",
+    "cross-encoder-ms-marco",
+    "gte-qwen-reranker",
+    "jina-reranker-v1",
+    "none"
+  ],
+  "eval_mode": [
+    "human_eval",
+    "no_answer_probe",
+    "offline_batch",
+    "online_shadow"
+  ],
+  "stop_reason": [
+    "eos",
+    "error",
+    "length"
+  ]
+}

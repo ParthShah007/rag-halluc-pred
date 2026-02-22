@@ -450,31 +450,32 @@ elif tab_choice == "🔮 Live Predictor":
 
         with st.spinner("Running predictions..."):
             try:
-                X_input = transform_single(config)
+                X_input, validation_warnings = transform_single(config)
 
-                # Correctness
-                corr_model = predictor.models.get("correctness")
-                thresh_path = os.path.join(PROJECT_ROOT, "models", "threshold_correctness.joblib")
-                threshold = joblib.load(thresh_path) if os.path.exists(thresh_path) else 0.5
-                corr_proba = corr_model.predict_proba(X_input)[:, 1][0]
-                corr_pred = int(corr_proba >= threshold)
+                # Show validation warnings if any
+                if validation_warnings:
+                    for w in validation_warnings:
+                        st.warning(f"⚠️ {w}")
 
-                # Hallucination
-                hal_model = predictor.models.get("hallucination")
-                thresh_path_h = os.path.join(PROJECT_ROOT, "models", "threshold_hallucination.joblib")
-                threshold_h = joblib.load(thresh_path_h) if os.path.exists(thresh_path_h) else 0.5
-                hal_proba = hal_model.predict_proba(X_input)[:, 1][0]
-                hal_pred = int(hal_proba >= threshold_h)
+                # Correctness (use calibrated model if available)
+                corr_result = predictor.predict_correctness(X_input)
+                corr_proba = corr_result["probability"]
+                corr_pred = corr_result["prediction"]
+                corr_calibrated = corr_result["calibrated"]
+
+                # Hallucination (use calibrated model if available)
+                hal_result = predictor.predict_hallucination(X_input)
+                hal_proba = hal_result["probability"]
+                hal_pred = hal_result["prediction"]
+                hal_calibrated = hal_result["calibrated"]
 
                 # Latency estimate
-                lat_feats = predictor.models.get("latency_features_list", features)
-                lat_cols = [c for c in lat_feats if c in X_input.columns]
-                lat_pred = predictor.models["latency"].predict(X_input[lat_cols])[0] if lat_cols else 0
+                lat_result = predictor.predict_latency(X_input)
+                lat_pred = lat_result["predicted_ms"]
 
                 # Cost estimate
-                cost_feats = predictor.models.get("cost_features_list", features)
-                cost_cols = [c for c in cost_feats if c in X_input.columns]
-                cost_pred = predictor.models["cost"].predict(X_input[cost_cols])[0] if cost_cols else 0
+                cost_result = predictor.predict_cost(X_input)
+                cost_pred = cost_result["predicted_usd"]
 
                 # Task type
                 task_pred = predictor.classify_query(query)
@@ -488,6 +489,15 @@ elif tab_choice == "🔮 Live Predictor":
         # ── Display Results ──
         st.markdown("---")
         st.subheader("📊 Prediction Results")
+
+        # Calibration badges
+        if corr_calibrated or hal_calibrated:
+            cal_models = []
+            if corr_calibrated:
+                cal_models.append("correctness")
+            if hal_calibrated:
+                cal_models.append("hallucination")
+            st.success(f"🎯 Using calibrated probabilities for: {', '.join(cal_models)}")
 
         r1, r2, r3, r4 = st.columns(4)
 
@@ -553,40 +563,41 @@ elif tab_choice == "🔮 Live Predictor":
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # SHAP explanation
+        # SHAP explanation (using cached explainers from predictor)
         st.subheader("🔍 SHAP Feature Explanations")
         try:
-            import shap
-            explainer = shap.TreeExplainer(corr_model)
-            shap_values = explainer.shap_values(X_input)
+            # Use cached SHAP explainers from the predictor
+            shap_corr = predictor.explain_prediction(X_input, "correctness", top_n=15)
+            shap_hal = predictor.explain_prediction(X_input, "hallucination", top_n=15)
 
-            if isinstance(shap_values, list):
-                sv = shap_values[1]
-            else:
-                sv = shap_values
+            shap_tab1, shap_tab2 = st.tabs(["🎯 Correctness SHAP", "⚠️ Hallucination SHAP"])
 
-            top_n = 15
-            abs_shap = np.abs(sv[0])
-            top_idx = np.argsort(abs_shap)[::-1][:top_n]
-            top_features = [features[i] for i in top_idx if i < len(features)]
-            top_vals = [float(sv[0][i]) for i in top_idx if i < len(features)]
+            for tab, shap_data, title, pos_label, neg_label in [
+                (shap_tab1, shap_corr, "Correctness", "↑ Correct", "↑ Incorrect"),
+                (shap_tab2, shap_hal, "Hallucination", "↑ Safe", "↑ Hallucination"),
+            ]:
+                with tab:
+                    if shap_data:
+                        top_features = [d["feature"] for d in shap_data]
+                        top_vals = [d["impact"] for d in shap_data]
+                        colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in top_vals]
 
-            colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in top_vals]
-
-            fig = go.Figure(go.Bar(
-                x=top_vals, y=top_features, orientation="h",
-                marker_color=colors,
-                text=[f"{v:+.3f}" for v in top_vals],
-                textposition="auto",
-            ))
-            fig.update_layout(
-                title="Top Feature Contributions (Green=↑Correct, Red=↑Incorrect)",
-                xaxis_title="SHAP Value",
-                height=400,
-                yaxis=dict(autorange="reversed"),
-                margin=dict(l=0, r=0, t=40, b=0),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                        fig = go.Figure(go.Bar(
+                            x=top_vals, y=top_features, orientation="h",
+                            marker_color=colors,
+                            text=[f"{v:+.3f}" for v in top_vals],
+                            textposition="auto",
+                        ))
+                        fig.update_layout(
+                            title=f"Top Feature Contributions (Green={pos_label}, Red={neg_label})",
+                            xaxis_title="SHAP Value",
+                            height=450,
+                            yaxis=dict(autorange="reversed"),
+                            margin=dict(l=0, r=0, t=40, b=0),
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("SHAP explainer not available for this model")
 
         except Exception as e:
             st.warning(f"SHAP not available: {e}")
@@ -594,4 +605,5 @@ elif tab_choice == "🔮 Live Predictor":
 # Footer
 st.sidebar.markdown("---")
 st.sidebar.markdown("Built for DataHack 2026")
+
 

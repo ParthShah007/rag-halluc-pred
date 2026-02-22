@@ -25,6 +25,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.calibration import CalibratedClassifierCV
 from imblearn.combine import SMOTEENN
 from imblearn.over_sampling import SMOTE
 import xgboost as xgb
@@ -463,6 +464,46 @@ def _compile_metrics(results_all, splits, features):
     return metrics
 
 
+def _calibrate_binary_models(splits):
+    """Wrap binary classifiers with isotonic calibration on the validation set.
+
+    Saves calibrated models as separate *_calibrated.joblib files.
+    Originals are preserved.
+    """
+    print("\n" + "=" * 70)
+    print("  CALIBRATION: Isotonic calibration on validation set")
+    print("=" * 70)
+
+    for task_name, model_file, y_col in [
+        ("Correctness", "xgb_correctness", "is_correct"),
+        ("Hallucination", "xgb_hallucination", "hallucination_flag"),
+    ]:
+        model_path = os.path.join(MODELS_DIR, f"{model_file}.joblib")
+        if not os.path.exists(model_path):
+            print(f"  ⚠ {model_file}.joblib not found, skipping calibration")
+            continue
+
+        clf = joblib.load(model_path)
+        X_val = splits["X_val"]
+        y_val = splits["val"][y_col].values
+
+        calibrated = CalibratedClassifierCV(clf, method="isotonic", cv="prefit")
+        calibrated.fit(X_val, y_val)
+
+        # Evaluate improvement
+        X_te = splits["X_test"]
+        y_te = splits["test"][y_col].values
+        raw_proba = clf.predict_proba(X_te)[:, 1]
+        cal_proba = calibrated.predict_proba(X_te)[:, 1]
+        raw_auc = roc_auc_score(y_te, raw_proba)
+        cal_auc = roc_auc_score(y_te, cal_proba)
+
+        cal_path = os.path.join(MODELS_DIR, f"{model_file}_calibrated.joblib")
+        joblib.dump(calibrated, cal_path)
+        print(f"  {task_name}: raw AUC={raw_auc:.4f} → calibrated AUC={cal_auc:.4f}")
+        print(f"    → Saved: {model_file}_calibrated.joblib")
+
+
 def train_all(df, features):
     """Train all models end-to-end with SMOTE."""
     from src.features.build_features import split_data, save_feature_list, save_onehot_categories
@@ -479,6 +520,9 @@ def train_all(df, features):
     train_latency(splits, features)
     train_cost(splits, features)
     train_task_classifier(splits)
+
+    # ── Probability Calibration ──
+    _calibrate_binary_models(splits)
 
     metrics = _compile_metrics(None, splits, features)
     metrics_path = os.path.join(MODELS_DIR, "metrics.json")

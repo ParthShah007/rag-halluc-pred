@@ -1,5 +1,8 @@
 """
-RAG-Optimize: FastAPI REST API v2
+RAG-Optimize: FastAPI REST API v3
+
+Enhanced with SHAP explanations, calibrated probabilities, input validation,
+and structured prediction logging.
 
 Run with: uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
 """
@@ -7,6 +10,7 @@ Run with: uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
 import os
 import sys
 import json
+import time
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,8 +23,9 @@ sys.path.insert(0, PROJECT_ROOT)
 app = FastAPI(
     title="RAG-Optimize API",
     description="Intelligent RAG Configuration Recommender — predict correctness, "
-                "hallucination risk, latency, and cost for any RAG configuration.",
-    version="2.0.0",
+                "hallucination risk, latency, and cost for any RAG configuration. "
+                "Now with SHAP explanations and calibrated probabilities.",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -31,7 +36,7 @@ app.add_middleware(
 )
 
 
-# ── Lazy model loading ──
+# ── Lazy model loading (cached at startup) ──
 _predictor = None
 
 def get_predictor():
@@ -63,14 +68,14 @@ class PredictRequest(BaseModel):
     chunking_strategy: str = Field(default="fixed_500")
     eval_mode: str = Field(default="llm_judge")
     stop_reason: str = Field(default="eos")
-    top1_score: float = Field(default=0.75, ge=0, le=1)
-    mean_retrieved_score: float = Field(default=0.55, ge=0, le=1)
+    top1_score: float = Field(default=0.75)
+    mean_retrieved_score: float = Field(default=0.55)
     recall_at_5: float = Field(default=1.0)
     recall_at_10: float = Field(default=1.0)
-    mrr_at_10: float = Field(default=0.6, ge=0, le=1)
-    n_retrieved_chunks: int = Field(default=5, ge=1, le=50)
-    temperature: float = Field(default=0.3, ge=0, le=2)
-    top_p: float = Field(default=0.9, ge=0, le=1)
+    mrr_at_10: float = Field(default=0.6)
+    n_retrieved_chunks: int = Field(default=5)
+    temperature: float = Field(default=0.3)
+    top_p: float = Field(default=0.9)
     prompt_tokens: int = Field(default=800)
     answer_tokens: int = Field(default=150)
     context_window_tokens: int = Field(default=8192)
@@ -85,16 +90,28 @@ class PredictRequest(BaseModel):
     is_noanswer_probe: int = Field(default=0)
     used_long_context_window: int = Field(default=0)
     answered_without_retrieval: int = Field(default=0)
+    explain: bool = Field(default=True, description="Include SHAP explanations in response")
+
+
+class ShapFeature(BaseModel):
+    feature: str
+    value: float
+    impact: float
 
 
 class PredictResponse(BaseModel):
     correctness: str
     correctness_confidence: float
+    correctness_calibrated: bool
     hallucination_risk: str
     hallucination_probability: float
+    hallucination_calibrated: bool
     estimated_latency_ms: float
     estimated_cost_usd: float
     query_task_type: str
+    shap_correctness: list[ShapFeature] = []
+    shap_hallucination: list[ShapFeature] = []
+    warnings: list[str] = []
 
 
 class PredictionResponse(BaseModel):
@@ -105,6 +122,8 @@ class PredictionResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     models_loaded: int
+    shap_explainers: int
+    calibrated_models: list[str]
     version: str
 
 
@@ -119,9 +138,10 @@ class MetricsResponse(BaseModel):
 def root():
     return {
         "name": "RAG-Optimize API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "docs": "/docs",
         "endpoints": ["/health", "/metrics", "/predict", "/classify-query"],
+        "features": ["shap_explanations", "calibrated_probabilities", "input_validation", "structured_logging"],
     }
 
 
@@ -130,7 +150,14 @@ def health():
     try:
         pred = get_predictor()
         n_models = len([k for k in pred.models if not k.endswith("_list")])
-        return HealthResponse(status="healthy", models_loaded=n_models, version="2.0.0")
+        calibrated = [k for k in pred.models if k.endswith("_calibrated")]
+        return HealthResponse(
+            status="healthy",
+            models_loaded=n_models,
+            shap_explainers=len(pred.shap_explainers),
+            calibrated_models=calibrated,
+            version="3.0.0",
+        )
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Models not available: {e}")
 
@@ -146,48 +173,39 @@ def get_metrics():
 
 @app.post("/predict", response_model=PredictResponse, tags=["predictions"])
 def predict(request: PredictRequest):
-    """Predict correctness, hallucination, latency, and cost for a full RAG config."""
+    """Predict correctness, hallucination, latency, and cost for a full RAG config.
+
+    Includes SHAP explanations showing which features most influenced each prediction,
+    calibrated probability estimates, and input validation warnings.
+    """
     try:
-        import joblib
         from src.features.build_features import transform_single
 
         pred = get_predictor()
         config = request.model_dump()
-        X = transform_single(config)
+        explain = config.pop("explain", True)
 
-        # Correctness
-        corr_model = pred.models.get("correctness")
-        thresh_path = os.path.join(PROJECT_ROOT, "models", "threshold_correctness.joblib")
-        threshold = joblib.load(thresh_path) if os.path.exists(thresh_path) else 0.5
-        corr_proba = float(corr_model.predict_proba(X)[:, 1][0])
+        X, validation_warnings = transform_single(config)
 
-        # Hallucination
-        hal_model = pred.models.get("hallucination")
-        thresh_path_h = os.path.join(PROJECT_ROOT, "models", "threshold_hallucination.joblib")
-        threshold_h = joblib.load(thresh_path_h) if os.path.exists(thresh_path_h) else 0.5
-        hal_proba = float(hal_model.predict_proba(X)[:, 1][0])
-
-        # Latency
-        lat_feats = pred.models.get("latency_features_list", [])
-        lat_cols = [c for c in lat_feats if c in X.columns]
-        lat_val = float(pred.models["latency"].predict(X[lat_cols])[0])
-
-        # Cost
-        cost_feats = pred.models.get("cost_features_list", [])
-        cost_cols = [c for c in cost_feats if c in X.columns]
-        cost_val = float(pred.models["cost"].predict(X[cost_cols])[0])
+        # Run all predictions with SHAP
+        results = pred.predict_all(X, config=config, explain=explain)
 
         # Task type
         task_type = pred.classify_query(config["query"])
 
         return PredictResponse(
-            correctness="CORRECT" if corr_proba >= threshold else "INCORRECT",
-            correctness_confidence=round(corr_proba, 4),
-            hallucination_risk="HIGH" if hal_proba >= threshold_h else "LOW",
-            hallucination_probability=round(hal_proba, 4),
-            estimated_latency_ms=round(lat_val, 2),
-            estimated_cost_usd=round(cost_val, 6),
+            correctness=results["correctness"]["label"],
+            correctness_confidence=results["correctness"]["probability"],
+            correctness_calibrated=results["correctness"]["calibrated"],
+            hallucination_risk=results["hallucination"]["label"],
+            hallucination_probability=results["hallucination"]["probability"],
+            hallucination_calibrated=results["hallucination"]["calibrated"],
+            estimated_latency_ms=results["latency"]["predicted_ms"],
+            estimated_cost_usd=results["cost"]["predicted_usd"],
             query_task_type=task_type,
+            shap_correctness=[ShapFeature(**f) for f in results.get("shap_correctness", [])],
+            shap_hallucination=[ShapFeature(**f) for f in results.get("shap_hallucination", [])],
+            warnings=validation_warnings,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction error: {e}")
@@ -209,6 +227,11 @@ def list_models():
     try:
         pred = get_predictor()
         models = [k for k in pred.models if not k.endswith("_list")]
-        return {"models": models, "count": len(models)}
+        return {
+            "models": models,
+            "count": len(models),
+            "calibrated": [k for k in models if k.endswith("_calibrated")],
+            "shap_enabled": list(pred.shap_explainers.keys()),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

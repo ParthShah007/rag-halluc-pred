@@ -187,7 +187,76 @@ def load_onehot_categories() -> dict:
         return json.load(f)
 
 
-def transform_single(config: dict, feature_list: list[str] = None) -> pd.DataFrame:
+def validate_config(config: dict) -> tuple[dict, list[str]]:
+    """Validate and sanitize a prediction config dict.
+
+    Clamps numeric values to valid ranges, flags unseen categoricals,
+    and tracks which fields were defaulted.
+
+    Args:
+        config: Raw config dict from user input.
+
+    Returns:
+        Tuple of (sanitized config, list of warning strings).
+    """
+    warnings = []
+    sanitized = dict(config)
+
+    # ── Numeric range clamping ──
+    clamp_rules = {
+        "temperature": (0.0, 2.0),
+        "top_p": (0.0, 1.0),
+        "top1_score": (0.0, 1.0),
+        "mean_retrieved_score": (0.0, 1.0),
+        "recall_at_5": (0.0, 1.0),
+        "recall_at_10": (0.0, 1.0),
+        "mrr_at_10": (0.0, 1.0),
+    }
+    for field, (lo, hi) in clamp_rules.items():
+        if field in sanitized:
+            val = sanitized[field]
+            if val < lo or val > hi:
+                clamped = max(lo, min(hi, val))
+                warnings.append(f"{field}={val} clamped to [{lo},{hi}] → {clamped}")
+                sanitized[field] = clamped
+
+    # ── Non-negative checks ──
+    non_neg_fields = [
+        "n_retrieved_chunks", "prompt_tokens", "answer_tokens",
+        "context_window_tokens", "max_new_tokens",
+        "latency_ms_retrieval", "latency_ms_generation",
+        "total_latency_ms", "total_cost_usd",
+    ]
+    for field in non_neg_fields:
+        if field in sanitized and sanitized[field] < 0:
+            warnings.append(f"{field}={sanitized[field]} is negative, set to 0")
+            sanitized[field] = 0
+
+    # ── Unseen categorical detection ──
+    try:
+        categories = load_onehot_categories()
+        for col, valid_values in categories.items():
+            if col in sanitized:
+                val = str(sanitized[col])
+                if val and val not in [str(v) for v in valid_values]:
+                    warnings.append(
+                        f"{col}='{val}' is unseen (valid: {valid_values}); "
+                        f"all one-hot columns will be 0 (safe fallback)"
+                    )
+    except FileNotFoundError:
+        pass  # Categories not saved yet (first run)
+
+    # ── Defaulted fields tracking ──
+    expected_fields = set(NUMERIC_FEATURES + FLAG_FEATURES + NOMINAL_FEATURES + ORDINAL_FEATURES + ["query"])
+    provided = set(config.keys())
+    missing = expected_fields - provided
+    if missing:
+        warnings.append(f"Defaulted fields: {sorted(missing)}")
+
+    return sanitized, warnings
+
+
+def transform_single(config: dict, feature_list: list[str] = None) -> tuple[pd.DataFrame, list[str]]:
     """Transform a single config dict into a feature vector for prediction.
 
     Args:
@@ -195,8 +264,11 @@ def transform_single(config: dict, feature_list: list[str] = None) -> pd.DataFra
         feature_list: Saved feature list from training. If None, loads from disk.
 
     Returns:
-        Single-row DataFrame with all feature columns, ready for model.predict().
+        Tuple of (single-row DataFrame with all feature columns, list of warning strings).
     """
+    # Validate and sanitize input
+    sanitized, warnings = validate_config(config)
+
     if feature_list is None:
         feature_list = load_feature_list()
 
@@ -206,19 +278,19 @@ def transform_single(config: dict, feature_list: list[str] = None) -> pd.DataFra
 
     # Numeric features
     for col in NUMERIC_FEATURES:
-        row[col] = config.get(col, 0.0)
+        row[col] = sanitized.get(col, 0.0)
 
     # Flag features
     for col in FLAG_FEATURES:
-        row[col] = config.get(col, 0)
+        row[col] = sanitized.get(col, 0)
 
     # Ordinal (difficulty)
     diff_map = {v: i for i, v in enumerate(DIFFICULTY_ORDER)}
-    row["difficulty_ord"] = diff_map.get(config.get("difficulty", "medium"), 1)
+    row["difficulty_ord"] = diff_map.get(sanitized.get("difficulty", "medium"), 1)
 
     # One-Hot encoding
     for col, values in categories.items():
-        selected = config.get(col, "")
+        selected = sanitized.get(col, "")
         for v in values:
             col_name = f"{col}_{v}"
             row[col_name] = 1 if str(selected) == str(v) else 0
@@ -231,7 +303,7 @@ def transform_single(config: dict, feature_list: list[str] = None) -> pd.DataFra
     row["cost_per_token"] = row.get("total_cost_usd", 0) / (row.get("prompt_tokens", 0) + row.get("answer_tokens", 0) + 1)
 
     # Text features
-    query = config.get("query", "")
+    query = sanitized.get("query", "")
     row["query_len"] = len(query) if query else 0
     row["query_word_count"] = len(query.split()) if query else 0
 
@@ -241,4 +313,4 @@ def transform_single(config: dict, feature_list: list[str] = None) -> pd.DataFra
         if col not in df.columns:
             df[col] = 0
 
-    return df[feature_list].fillna(0)
+    return df[feature_list].fillna(0), warnings

@@ -35,6 +35,9 @@ catboost_info/
 .env
 .pytest_cache/
 
+# Runtime logs (prediction logging)
+logs/
+
 # Local-only scripts
 start_services.bat
 stop_services.bat
